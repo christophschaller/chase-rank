@@ -1,4 +1,4 @@
-$DataPath = "./data"
+$DataPath = "./data/osm"
 $DataPath = Resolve-Path $DataPath
 $OsrmImage = "ghcr.io/project-osrm/osrm-backend"
 $OsrmRegion = "baden-wuerttemberg-latest"

@@ -1,4 +1,4 @@
-$DataPath = "./data"
+$DataPath = "./data/osm"
 $DataPath = Resolve-Path $DataPath
 $OsrmProfile = "/opt/bicycle.lua"
 $OsrmImage = "ghcr.io/project-osrm/osrm-backend"
