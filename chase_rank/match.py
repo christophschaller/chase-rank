@@ -1,9 +1,12 @@
+from datetime import timedelta
 from typing import Dict, Tuple, List
 
+import numpy as np
 import gpxpy
 import geopandas as gpd
 import pandas as pd
 import routingpy.exceptions
+import geopy.distance
 from shapely.geometry import LineString, Point
 from routingpy import Valhalla, exceptions
 from routingpy import utils as routingpy_utils
@@ -75,7 +78,7 @@ def load_edges(edges: List, match_shape: List) -> gpd.GeoDataFrame:
     edge_data = []
     edge_geometry = []
     for edge in edges:
-        edge_points = match_shape[edge["begin_shape_index"]:edge["end_shape_index"]+1]
+        edge_points = match_shape[edge["begin_shape_index"]:edge["end_shape_index"] + 1]
         edge_geometry.append(LineString(edge_points))
         # TODO: figure out what is most often available and what we really need
         edge_data.append({
@@ -120,7 +123,6 @@ def match_section(section: gpd.GeoDataFrame) -> Dict:
     # but the whole parsing section of routingpy is causing too much hassle
     # TODO: encode locations and timecodes into polyline instead of just passing locations
     locations = section[["longitude", "latitude"]].values.tolist()
-    print("locations", len(locations))
     if len(locations) <= 1:
         # if we got less than two points its not a proper shape
         return {
@@ -134,7 +136,7 @@ def match_section(section: gpd.GeoDataFrame) -> Dict:
     # https://valhalla.readthedocs.io/en/latest/api/turn-by-turn/api-reference/#costing-models
     costing_options = {
         "ignore_access": True,  # allow to use roads we are not allowed to use -> oneway in false direction etc.
-                                # does not include stairs :(
+        # does not include stairs :(
         "maneuver_penalty": 5,  # default is 5 seconds / penalty for switching to road with different name
         "bicycle_type": "Cross",  # Road, Hybrid / City, Cross, Mountain
         # "cycling_speed": 20,  # 20 default for Cross
@@ -151,7 +153,7 @@ def match_section(section: gpd.GeoDataFrame) -> Dict:
     # search_radius
     params = VALHALLA_CLIENT.get_trace_attributes_params(
         locations,
-        "bicycle",          # TODO: possible fallback to walking?
+        "bicycle",  # TODO: possible fallback to walking?
         "map_snap",
         encoded_polyline,
         filters,
@@ -167,6 +169,7 @@ def match_section(section: gpd.GeoDataFrame) -> Dict:
             "/trace_attributes", get_params=get_params, post_params=params, dry_run=dry_run
         )
     except routingpy.exceptions.RouterApiError as e:
+        # TODO: logging instead of prints
         print(e)
         return {}
 
@@ -175,12 +178,9 @@ def match_track(track: gpd.GeoDataFrame) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataF
     traces = []
     edges = []
 
-    print(len(track.groupby(track["section"])), "\n")
     edge_index_offset = 0
     for i, section in track.groupby(track["section"]):
-        print("\n", i)
         match = match_section(section)
-        print(match)
 
         if match.get("matched_points"):
             trace_df = load_trace(match["matched_points"], len(match["edges"]))
@@ -203,6 +203,7 @@ def match_track(track: gpd.GeoDataFrame) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataF
                 trace_df["edge_index"] = trace_df["edge_index"].apply(
                     lambda index: index + edge_index_offset if isinstance(index, int) else None)
             except TypeError as e:
+                # TODO: logging instead of prints
                 print("### Exception")
                 print(match["matched_points"])
                 print(match["edges"])
@@ -221,27 +222,79 @@ def match_track(track: gpd.GeoDataFrame) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataF
     return trace_df, edges_df
 
 
-if __name__ == '__main__':
-    TEST_TRACK_PATH = "../data/routes/test_track.gpx"
+def combine_data(gpx_df, trace_df, edges_df):
+    trace_data_df = trace_df.apply(
+        lambda row: edges_df.iloc[row["edge_index"]]
+        if isinstance(row["edge_index"], int) else None, axis=1)[
+        ["length", "speed", "use", "unpaved", "surface", "travel_mode", "osm_way_id",
+         "geometry"]]
+    trace_data_df["surface_section"] = (trace_data_df["surface"] != trace_data_df.shift()["surface"]).cumsum()
+    gpx_df_copy = gpx_df.copy()
+    gpx_df_copy[["surface", "surface_section", "use", "osm_way_id"]] = trace_data_df[
+        ["surface", "surface_section", "use", "osm_way_id"]]
 
-    with open(TEST_TRACK_PATH) as file_pointer:
-        gpx_content = gpxpy.parse(file_pointer)
+    # get distance
+    shift_frame = gpx_df_copy.shift(-1).drop("geometry", axis=1).rename(
+        columns={"longitude": "longitude_2", "latitude": "latitude_2"})
 
-    gpx_data = []
-    gpx_geometry = []
-    for point in gpx_content.tracks[0].segments[0].points:
-        gpx_geometry.append(Point(point.longitude, point.latitude))
-        gpx_data.append({
-            # clear tzinfo until it can be handled for the match query
-            "time": point.time.replace(tzinfo=None),
-            "elev": point.elevation,
-            "longitude": point.longitude,
-            "latitude": point.latitude
-        })
+    def dist(row: pd.core.series.Series) -> np.float64:
+        return geopy.distance.geodesic(
+            (row["latitude"], row["longitude"]), (row["latitude_2"], row["longitude_2"])
+        ).meters
 
-    gpx_frame = gpd.GeoDataFrame(
-        gpx_data, geometry=gpx_geometry, crs="EPSG:4326").to_crs("EPSG:3857")
-    # search for splits in the trace bigger than 1s and label consecutive sections
-    gpx_frame["section"] = (gpx_frame["time"].diff() != pd.Timedelta("1 second")).cumsum()
+    gpx_df_copy["distance"] = pd.concat([gpx_df_copy, shift_frame], axis=1)[
+        ["longitude", "latitude", "longitude_2", "latitude_2"]
+    ].fillna(method="ffill", axis=0).apply(dist, axis=1).fillna(np.float64(0))
+    del shift_frame
 
-    trace_df, edges_df = match_track(gpx_frame)
+    return gpx_df_copy
+
+
+def get_section_analytics(gpx_frame):
+    last_time = None
+    section_dict = {
+        "section": [],
+        "paused_time": [],
+        "total_asc": [],
+        "total_desc": [],
+        "total_km": [],
+        "arg_kph": [],
+        "distance_between_stops": []
+    }
+
+    # Pause TIME
+    for index, group in gpx_frame.groupby(gpx_frame["section"]):
+        paused_time = group.iloc[0]["time"] - last_time if last_time else timedelta(days=0)
+        last_time = group.iloc[-1]["time"]
+
+        # print(index,paused_time)
+        section_dict["section"].append(index)
+        section_dict["paused_time"].append(paused_time)
+
+        # Asc Desc
+        total_asc = 0
+        total_desc = 0
+        for i in range(0, len(group) - 1):
+            a = i + 1
+            diff = group.iloc[a]["elev"] - group.iloc[i]["elev"]
+
+            if diff >= 0:
+                total_asc = total_asc + diff
+            elif diff <= 0:
+                total_desc = total_desc + diff
+
+        section_dict["total_asc"].append(round(total_asc, 2))
+        section_dict["total_desc"].append(round(total_desc, 2))
+
+        # Km and Kph
+        distance = group["distance"].sum()
+
+        avrg_kph = distance / len(group) * 3.6
+        section_dict["total_km"].append(round(distance, 2))
+        section_dict["arg_kph"].append(round(avrg_kph, 2))
+
+        # Distance between Stops
+        section_dict["distance_between_stops"].append(group.iloc[-1]["distance"])
+
+    section_df = pd.DataFrame(data=section_dict)
+    return section_df
