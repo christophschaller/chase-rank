@@ -257,7 +257,7 @@ def get_section_analytics(gpx_frame):
         "paused_time": [],
         "total_asc": [],
         "total_desc": [],
-        "total_km": [],
+        "total_distance": [],
         "arg_kph": [],
         "distance_between_stops": []
     }
@@ -290,7 +290,7 @@ def get_section_analytics(gpx_frame):
         distance = group["distance"].sum()
 
         avrg_kph = distance / len(group) * 3.6
-        section_dict["total_km"].append(round(distance, 2))
+        section_dict["total_distance"].append(round(distance, 2))
         section_dict["arg_kph"].append(round(avrg_kph, 2))
 
         # Distance between Stops
