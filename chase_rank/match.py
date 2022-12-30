@@ -1,12 +1,9 @@
-from datetime import timedelta
 from typing import Dict, Tuple, List
 
-import numpy as np
 import gpxpy
 import geopandas as gpd
 import pandas as pd
 import routingpy.exceptions
-import geopy.distance
 from shapely.geometry import LineString, Point
 from routingpy import Valhalla, exceptions
 from routingpy import utils as routingpy_utils
@@ -220,81 +217,3 @@ def match_track(track: gpd.GeoDataFrame) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataF
     edges_df = pd.concat(edges, axis=0).reset_index(drop=True)
 
     return trace_df, edges_df
-
-
-def combine_data(gpx_df, trace_df, edges_df):
-    trace_data_df = trace_df.apply(
-        lambda row: edges_df.iloc[row["edge_index"]]
-        if isinstance(row["edge_index"], int) else None, axis=1)[
-        ["length", "speed", "use", "unpaved", "surface", "travel_mode", "osm_way_id",
-         "geometry"]]
-    trace_data_df["surface_section"] = (trace_data_df["surface"] != trace_data_df.shift()["surface"]).cumsum()
-    gpx_df_copy = gpx_df.copy()
-    gpx_df_copy[["surface", "surface_section", "use", "osm_way_id"]] = trace_data_df[
-        ["surface", "surface_section", "use", "osm_way_id"]]
-
-    # get distance
-    shift_frame = gpx_df_copy.shift(-1).drop("geometry", axis=1).rename(
-        columns={"longitude": "longitude_2", "latitude": "latitude_2"})
-
-    def dist(row: pd.core.series.Series) -> np.float64:
-        return geopy.distance.geodesic(
-            (row["latitude"], row["longitude"]), (row["latitude_2"], row["longitude_2"])
-        ).meters
-
-    gpx_df_copy["distance"] = pd.concat([gpx_df_copy, shift_frame], axis=1)[
-        ["longitude", "latitude", "longitude_2", "latitude_2"]
-    ].fillna(method="ffill", axis=0).apply(dist, axis=1).fillna(np.float64(0))
-    del shift_frame
-
-    return gpx_df_copy
-
-
-def get_section_analytics(gpx_frame):
-    last_time = None
-    section_dict = {
-        "section": [],
-        "paused_time": [],
-        "total_asc": [],
-        "total_desc": [],
-        "total_distance": [],
-        "arg_kph": [],
-        "distance_between_stops": []
-    }
-
-    # Pause TIME
-    for index, group in gpx_frame.groupby(gpx_frame["section"]):
-        paused_time = group.iloc[0]["time"] - last_time if last_time else timedelta(days=0)
-        last_time = group.iloc[-1]["time"]
-
-        # print(index,paused_time)
-        section_dict["section"].append(index)
-        section_dict["paused_time"].append(paused_time)
-
-        # Asc Desc
-        total_asc = 0
-        total_desc = 0
-        for i in range(0, len(group) - 1):
-            a = i + 1
-            diff = group.iloc[a]["elev"] - group.iloc[i]["elev"]
-
-            if diff >= 0:
-                total_asc = total_asc + diff
-            elif diff <= 0:
-                total_desc = total_desc + diff
-
-        section_dict["total_asc"].append(round(total_asc, 2))
-        section_dict["total_desc"].append(round(total_desc, 2))
-
-        # Km and Kph
-        distance = group["distance"].sum()
-
-        avrg_kph = distance / len(group) * 3.6
-        section_dict["total_distance"].append(round(distance, 2))
-        section_dict["arg_kph"].append(round(avrg_kph, 2))
-
-        # Distance between Stops
-        section_dict["distance_between_stops"].append(group.iloc[-1]["distance"])
-
-    section_df = pd.DataFrame(data=section_dict)
-    return section_df
