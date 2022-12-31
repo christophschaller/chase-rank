@@ -96,7 +96,7 @@ def save_match(points_df, section_analytics_df):
 
     source_track_name = TEST_TRACK_PATH.stem
     start_date = points_df["time"][0].isoformat().replace(":", "-")
-    distance = section_analytics_df["total_km"].sum() - section_analytics_df["distance_between_stops"].sum()
+    distance = section_analytics_df["total_distance"].sum() - section_analytics_df["distance_between_stops"].sum()
 
     folder_path = Path(PROCESSED_TRACKS_PATH, f"{start_date}_{source_track_name}")
     folder_path.mkdir(parents=True, exist_ok=True)
@@ -117,6 +117,6 @@ def save_match(points_df, section_analytics_df):
 
 def process_match(gpx_df, trace_df, edges_df):
     points_df = combine_data(gpx_df, trace_df, edges_df)
-    sections_df = get_section_analytics(gpx_df)
+    sections_df = get_section_analytics(points_df)
 
     save_match(points_df, sections_df)
