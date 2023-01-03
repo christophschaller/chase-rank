@@ -111,6 +111,13 @@ def get_elevation_info(points_df):
     total_desc = diffs[diffs < 0].sum()
     return total_asc, total_desc
 
+def checkKey(dic, key):
+    if key in dic.keys():
+        result = dic[key]
+    else:
+        result = 0
+    return result
+
 
 # TODO: mach so als funktion auch keinen Sinn
 def save_match(points_df, section_analytics_df):
@@ -133,6 +140,14 @@ def save_match(points_df, section_analytics_df):
         "total_descend":get_elevation_info(points_df)[1],
         "duration": get_duration(points_df),
         "paused_time": get_pause_duration(points_df),
+        'paved_smooth': checkKey(surface_stats(points_df),'paved_smooth'),
+        'compacted': checkKey(surface_stats(points_df),'compacted'),
+        'path': checkKey(surface_stats(points_df),'path'),
+        'paved': checkKey(surface_stats(points_df),'paved'),
+        'paved_rough': checkKey(surface_stats(points_df),'paved_rought'),
+        'gravel': checkKey(surface_stats(points_df),'gravel'),
+        'dirt': checkKey(surface_stats(points_df),'dirt'),
+        'null': checkKey(surface_stats(points_df),'null'),
         #"average_kph": 
     }
 
