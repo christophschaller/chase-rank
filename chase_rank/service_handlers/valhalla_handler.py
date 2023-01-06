@@ -28,6 +28,9 @@ class ValhallaHandler:
             print("lol", response)
             print(response.content)
             return None
+        # b'{"error_code":154,"error":"Path distance exceeds the max distance limit: 200000 meters",
+        # "status_code":400,"status":"Bad Request"}'
+        # b'{"error_code":171,"error":"No suitable edges near location","status_code":400,"status":"Bad Request"}'
 
         if response.ok:
             return response
@@ -41,12 +44,13 @@ class ValhallaHandler:
         trace_geometry = []
         for index, point in enumerate(matched_points):
             trace_geometry.append(Point(point["lon"], point["lat"]))
-            if point.get("edge_index"):
+            if point.get("edge_index") is not None:
                 # sometimes the edge_index seems to hold a super high number (maybe an id?)
                 # if this happens we set the edge_index to the same as the previous points
                 if point["edge_index"] >= edges_size:
                     if index > 0:
-                        point["edge_index"] = matched_points[index - 1]["edge_index"]
+                        previous_edge_index = matched_points[index - 1].get("edge_index")
+                        point["edge_index"] = previous_edge_index if previous_edge_index else None
                     else:
                         point["edge_index"] = 0
             elif edges_size:
@@ -62,7 +66,6 @@ class ValhallaHandler:
             trace_data,
             geometry=trace_geometry,
             crs="EPSG:4326").to_crs("EPSG:3857")
-
         return trace_df
 
     @staticmethod
@@ -71,7 +74,10 @@ class ValhallaHandler:
         edge_geometry = []
         for edge in edges:
             edge_points = match_shape[edge["begin_shape_index"]:edge["end_shape_index"] + 1]
-            edge_geometry.append(LineString(edge_points))
+            if len(edge_points) > 1:
+                edge_geometry.append(LineString(edge_points))
+            else:
+                edge_geometry.append(Point(edge_points[0]))
             # TODO: figure out what is most often available and what we really need
             edge_data.append({
                 "length": edge.get("length"),
@@ -102,11 +108,13 @@ class ValhallaHandler:
 
     @staticmethod
     def _combine_data(gpx_df, trace_df, edges_df):
+        empty_edge = edges_df.iloc[0].copy()
+        empty_edge.values[:] = None
         trace_data_df = trace_df.apply(
-            lambda row: edges_df.iloc[row["edge_index"]]
-            if isinstance(row["edge_index"], int) else None, axis=1)[
-            ["length", "speed", "use", "unpaved", "surface", "travel_mode", "osm_way_id",
-             "geometry"]]
+            lambda row: edges_df.iloc[int(row["edge_index"])]
+            if not pd.isnull(row["edge_index"]) else empty_edge, axis=1)
+        trace_data_df = trace_data_df[
+            ["length", "speed", "use", "unpaved", "surface", "travel_mode", "osm_way_id", "geometry"]]
         trace_data_df["surface_section"] = (trace_data_df["surface"] != trace_data_df.shift()["surface"]).cumsum()
         gpx_df_copy = gpx_df.copy()
         gpx_df_copy[["surface", "surface_section", "use", "osm_way_id"]] = trace_data_df[
@@ -128,13 +136,19 @@ class ValhallaHandler:
 
         return gpx_df_copy
 
-    def _match_section(self, locations: List[Tuple[int, int]]) -> Dict:
+    def _match_section(self, locations: List[Tuple[int, int]], timestamps: List[int] = None) -> Dict:
         if len(locations) <= 1:
             # if we got less than two points it's not a proper shape
             return {}
 
         url = f"{self.base_url}/trace_attributes"
-        locations = [{"lon": lon, "lat": lat} for lon, lat in locations]
+        if timestamps is None:
+            locations = [{"lon": lon, "lat": lat} for lon, lat in locations]
+        else:
+            locations = [
+                {"lon": lon, "lat": lat, "time": time}
+                for lon, lat, time in zip(*zip(*locations), timestamps)
+            ]
 
         # the following dict holds parameters to tune the costing model used for matching
         # https://valhalla.readthedocs.io/en/latest/api/turn-by-turn/api-reference/#costing-models
@@ -174,17 +188,63 @@ class ValhallaHandler:
             return response.json()
         return {}
 
-    def match(self, track: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    @staticmethod
+    def _split_track(track: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        # TODO: this whole function should be based on detecting pauses in movement
+        #       so far I'm just splitting stuff at random
+        track = track.copy()
+
         # search for splits in the trace bigger than 1s and label consecutive sections
         # TODO: automatically determine default interval; it can't be 1s for every track right?
-        track["section"] = (track["time"].diff() != pd.Timedelta("1 second")).cumsum()
+        # NOTE: Smartphones really fuck up the interval, 5s seems to be save
+        #       10s and more confuse the matcher and 2~3 are still to short to catch all outliers
+        track["match_section"] = (track["timestamp"].diff() > pd.Timedelta(seconds=5)).cumsum()
+
+        # get distance
+        # we probably also do this somewhere else, but I really need it here and haven't cleaned up yet
+        # TODO: clean up
+        shift_track = track.shift(-1).drop("geometry", axis=1).rename(
+            columns={"longitude": "longitude_2", "latitude": "latitude_2"})
+
+        def dist(row: pd.Series) -> np.float64:
+            return geopy.distance.geodesic(
+                (row["latitude"], row["longitude"]), (row["latitude_2"], row["longitude_2"])
+            ).meters
+
+        track["distance"] = pd.concat([track, shift_track], axis=1)[
+            ["longitude", "latitude", "longitude_2", "latitude_2"]
+        ].fillna(method="ffill", axis=0).apply(dist, axis=1).fillna(np.float64(0))
+        del shift_track
+
+        # check if section we got so far are too long and split them up
+        group_sections = []
+        last_section_index = 0
+        for index, group in track.groupby("match_section"):
+            section_distance = group["distance"].sum()
+            if section_distance > 10000:  # 20000 is the maximum
+                new_sections = group["distance"].cumsum().apply(
+                    lambda d: int(d // 5000) + last_section_index).values.tolist()
+                group_sections.extend(new_sections)
+                last_section_index = new_sections[-1]
+            else:
+                last_section_index += 1
+                group_sections.extend([last_section_index] * len(group))
+
+        track["match_section"] = group_sections
+        return track
+
+    def match(self, track: gpd.GeoDataFrame) -> (gpd.GeoDataFrame, None):
+        # split track in sections small enough for matching
+        track = self._split_track(track)
 
         traces = []
         edges = []
         edge_index_offset = 0
-        for i, section in track.groupby(track["section"]):
+        for i, section in track.groupby(track["match_section"]):
+            start_time = section["timestamp"].iloc[0]
             match = self._match_section(
-                section[["longitude", "latitude"]].values.tolist()
+                section[["longitude", "latitude"]].values.tolist(),
+                section["timestamp"].apply(lambda t: (t - start_time).seconds).values.tolist()
             )
 
             if match.get("matched_points"):
@@ -198,7 +258,7 @@ class ValhallaHandler:
                     "edge_index": None,
                     "distance_along_edge": None,
                     "distance_from_trace_point": None
-                } for point in range(len(section))]
+                }] * len(section)
                 trace_df = gpd.GeoDataFrame(data)
 
             if match.get("edges"):
@@ -206,7 +266,7 @@ class ValhallaHandler:
                 edges_df = self._load_edges(match["edges"], match_shape)
                 try:
                     trace_df["edge_index"] = trace_df["edge_index"].apply(
-                        lambda index: index + edge_index_offset if isinstance(index, int) else None)
+                        lambda index: index + edge_index_offset if index is not None else None)
                 except TypeError as e:
                     # TODO: logging instead of prints
                     print("### Exception")
@@ -220,6 +280,9 @@ class ValhallaHandler:
                 edges.append(edges_df)
 
             traces.append(trace_df)
+
+        if not traces or not edges:
+            return None
 
         trace_df = pd.concat(traces, axis=0).reset_index(drop=True)
         edges_df = pd.concat(edges, axis=0).reset_index(drop=True)
