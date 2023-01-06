@@ -29,6 +29,6 @@ class MatchHandler:
         match_path = Path(self.path, f"{activity_id}.parquet")
         match.to_parquet(match_path)
 
-    def add_track(self, activity_id: str, track: gpd.GeoDataFrame):
+    def add_match(self, activity_id: str, track: gpd.GeoDataFrame):
         self.save_match(activity_id, track)
         self.match_ids.append(int(activity_id))
