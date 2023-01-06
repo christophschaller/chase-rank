@@ -92,24 +92,28 @@ def get_section_analytics(gpx_frame: gpd.GeoDataFrame) -> pd.DataFrame:
     section_df = pd.DataFrame(data=section_dict)
     return section_df
 
+
 def get_duration(points_df):
     time_as_int = len(points_df)
     time_as_time = time.strftime('%H:%M:%S', time.gmtime(time_as_int))
     return time_as_time
 
+
 # TODO: Paused Time ist noch nicht korrekt. Diff zu SUM(Section Paused time), ebenso die Duration
 def get_pause_duration(points_df):
     points_df['coordinates'] = points_df.apply(lambda row: (row['latitude'], row['longitude']), axis=1)
     driving_time = points_df['coordinates'].nunique()
-    time_as_int = len(points_df)-driving_time
+    time_as_int = len(points_df) - driving_time
     time_as_time = time.strftime('%H:%M:%S', time.gmtime(time_as_int))
     return time_as_time
+
 
 def get_elevation_info(points_df):
     diffs = points_df["elev"].diff()
     total_asc = diffs[diffs > 0].sum()
     total_desc = diffs[diffs < 0].sum()
     return total_asc, total_desc
+
 
 def checkKey(dic, key):
     if key in dic.keys():
@@ -136,19 +140,19 @@ def save_match(points_df, section_analytics_df):
         # store distance without taking travel during pauses into account
         "distance": distance,
         "surfaces": surface_stats(points_df),
-        "total_ascend":get_elevation_info(points_df)[0],
-        "total_descend":get_elevation_info(points_df)[1],
+        "total_ascend": get_elevation_info(points_df)[0],
+        "total_descend": get_elevation_info(points_df)[1],
         "duration": get_duration(points_df),
         "paused_time": get_pause_duration(points_df),
-        'paved_smooth': checkKey(surface_stats(points_df),'paved_smooth'),
-        'compacted': checkKey(surface_stats(points_df),'compacted'),
-        'path': checkKey(surface_stats(points_df),'path'),
-        'paved': checkKey(surface_stats(points_df),'paved'),
-        'paved_rough': checkKey(surface_stats(points_df),'paved_rought'),
-        'gravel': checkKey(surface_stats(points_df),'gravel'),
-        'dirt': checkKey(surface_stats(points_df),'dirt'),
-        'null': checkKey(surface_stats(points_df),'null'),
-        #"average_kph": 
+        'paved_smooth': checkKey(surface_stats(points_df), 'paved_smooth'),
+        'compacted': checkKey(surface_stats(points_df), 'compacted'),
+        'path': checkKey(surface_stats(points_df), 'path'),
+        'paved': checkKey(surface_stats(points_df), 'paved'),
+        'paved_rough': checkKey(surface_stats(points_df), 'paved_rought'),
+        'gravel': checkKey(surface_stats(points_df), 'gravel'),
+        'dirt': checkKey(surface_stats(points_df), 'dirt'),
+        'null': checkKey(surface_stats(points_df), 'null'),
+        # "average_kph":
     }
 
     with open(Path(folder_path, "track_info.json"), "w") as file_pointer:
@@ -159,7 +163,7 @@ def save_match(points_df, section_analytics_df):
 
 
 def surface_stats(gpx_frame: gpd.GeoDataFrame) -> dict:
-    surfaces = collections.defaultdict(lambda: 0.)# Distance(kilometers=0))
+    surfaces = collections.defaultdict(lambda: 0.)  # Distance(kilometers=0))
     for index, surface_group in gpx_frame.groupby("surface_section"):
         surface = surface_group["surface"].values[0]
         # distance = group["distance"].dropna(axis=0).sum()
