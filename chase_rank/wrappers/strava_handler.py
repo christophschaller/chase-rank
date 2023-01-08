@@ -1,12 +1,10 @@
 import time
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, List
 
 import requests
-import geopandas as gpd
-from shapely.geometry import Point
 
-from ..data_handlers import ActivityHandler, UserHandler, TrackHandler
+from .user_handler import StravaUserHandler
 
 
 def sleep_until_next_quarter():
@@ -23,15 +21,11 @@ class StravaHandler:
     def __init__(self,
                  client_id: str,
                  client_secret: str,
-                 user_handler: UserHandler,
-                 activity_handler: ActivityHandler,
-                 track_handler: TrackHandler
+                 user_handler: StravaUserHandler,
                  ):
         self.client_id = client_id
         self.client_secret = client_secret
-        self.user_handler: UserHandler = user_handler
-        self.activity_handler: ActivityHandler = activity_handler
-        self.track_handler: TrackHandler = track_handler
+        self.user_handler: StravaUserHandler = user_handler
 
         # these values will track the usage reported in the headers of api responses
         self.limit_daily = 1000
@@ -39,13 +33,13 @@ class StravaHandler:
         self.usage_daily = 0
         self.usage_15_min = 0
 
-    def _auth(self, user_id: str):
+    def _auth(self, user_id: int):
         if self.user_handler[user_id].refresh_token:
             self._refresh_token(user_id)
         elif self.user_handler[user_id].code:
             self._request_token(user_id)
             self.user_handler[user_id].code = ""
-            self.user_handler.save_users()
+            self.user_handler._save_users()
         else:
             print(
                 f"AUTH ERROR: {user_id} has no auth code\ncode: {self.user_handler[user_id].code}")
@@ -56,13 +50,13 @@ class StravaHandler:
         #     self._request_code()
         #     self._request_token()
 
-    def _request_code(self, user_id: str):
+    def _request_code(self, user_id: int):
         # TODO: call frontend for auth on strava
         # -> https://www.strava.com/oauth/authorize?client_id=99283&response_type=code&redirect_uri=http://localhost
         # /exchange_token&approval_prompt=force&scope=activity:read_all
         pass
 
-    def _request_token(self, user_id: str):
+    def _request_token(self, user_id: int):
         auth_url = "https://www.strava.com/oauth/token"
         payload = {
             "client_id": self.client_id,
@@ -79,7 +73,7 @@ class StravaHandler:
         self.user_handler[user_id].access_token = response.json()["access_token"]
         self.user_handler[user_id].refresh_token = response.json()["refresh_token"]
 
-    def _refresh_token(self, user_id: str):
+    def _refresh_token(self, user_id: int):
         auth_url = "https://www.strava.com/oauth/token"
         payload = {
             "client_id": self.client_id,
@@ -102,8 +96,6 @@ class StravaHandler:
         if limit:
             limit_15_min, limit_daily = limit.split(",")
             self.limit_15_min, self.limit_daily = int(limit_15_min), int(limit_daily)
-            # print(f"limit_daily: {limit_daily}\nlimit_15_min: {limit_15_min}")
-            # debuggery
         else:
             # TODO: log
             print("No Rate Limit In Headers")
@@ -112,8 +104,6 @@ class StravaHandler:
         if usage:
             usage_15_min, usage_daily = usage.split(",")
             self.usage_15_min, self.usage_daily = int(usage_15_min), int(usage_daily)
-            # print(f"usage_daily: {usage_daily}\nusage_15_min: {usage_15_min}")
-            # debuggery
         else:
             # TODO: log
             print("No Usage In Headers")
@@ -130,7 +120,7 @@ class StravaHandler:
             self.usage_15_min = 0
 
     def _request(self,
-                 user_id: str,
+                 user_id: int,
                  method: str,
                  url: str,
                  data: Dict = None,
@@ -138,11 +128,11 @@ class StravaHandler:
                  retries: int = 1
                  ):
         self._rate_limit()
-        header = {"Authorization": f"Bearer {self.user_handler[user_id].access_token}"}
+        headers = {"Authorization": f"Bearer {self.user_handler[user_id].access_token}"}
         response = requests.request(
             method=method,
             url=url,
-            headers=header,
+            headers=headers,
             data=data,
             params=params
         )
@@ -170,10 +160,10 @@ class StravaHandler:
                 return None
             if response.status_code == 429:
                 # Too Many Requests; you have exceeded rate limits
-                pass
+                return None
             if response.status_code == 500:
                 # Strava is having issues
-                pass
+                return None
             # TODO: richtiges logging wäre was feines
             print()
             print(f"request: {method} - {url}"
@@ -189,10 +179,9 @@ class StravaHandler:
         if response.ok:
             return response
 
-    def activity(self, user_id: str, activity_id: str):
-        if activity_id in self.activity_handler.activities.index:
-            return self.activity_handler[activity_id]
-
+    def get_activity_by_id(self, user_id: int, activity_id: int) -> Dict:
+        # getActivityById
+        # https://developers.strava.com/docs/reference/#api-Activities-getActivityById
         activity_url = f"https://www.strava.com/api/v3/activities/{activity_id}"
         params = {
             "include_all_efforts": False  # we don't use those
@@ -204,10 +193,12 @@ class StravaHandler:
             data=None,
             params=params
         )
-        self.activity_handler.add_activity(response.json())
-        return self.activity_handler[activity_id]
+        return response.json()
 
-    def activities(self, user_id: str, before: datetime = None, after: datetime = None):
+    def get_logged_in_athlete_activities(
+            self, user_id: int, before: datetime = None, after: datetime = None) -> List[Dict]:
+        # getLoggedInAthleteActivities:
+        # https://developers.strava.com/docs/reference/#api-Activities-getLoggedInAthleteActivities
         activities_url = "https://www.strava.com/api/v3/athlete/activities"
         params = {
             "per_page": "200",  # defaults to 30
@@ -239,26 +230,19 @@ class StravaHandler:
             current_page += 1
             params["page"] = current_page
 
-        self.activity_handler.add_activities(activities)
+        return activities
 
-        return self.activity_handler.activities[
-            (self.activity_handler.activities.user == user_id) &
-            (after < self.activity_handler.activities.start_date) &
-            (self.activity_handler.activities.start_date < before)
-            ]
-
-    def activity_track(self, user_id: str, activity_id: str):
-        if activity_id in self.track_handler.tracklist:
-            return self.track_handler[activity_id]
-
+    def get_activity_streams(self, user_id: int, activity_id: int, streams: List[str] = None) -> (Dict, None):
+        # getActivityStreams
+        # https://developers.strava.com/docs/reference/#api-Streams-getActivityStreams
+        # for latlng, time, altitude
+        # https://developers.strava.com/docs/reference/#api-models-LatLng
+        # https://developers.strava.com/docs/reference/#api-models-AltitudeStream
+        # https://developers.strava.com/docs/reference/#api-models-TimeStream
         url = f"https://www.strava.com/api/v3/activities/{activity_id}/streams"
 
-        if activity_id in self.activity_handler.activities.index:
-            activity = self.activity_handler[activity_id]
-        else:
-            activity = self.activity(user_id=user_id, activity_id=activity_id)
-        start_time = activity["start_date"]
-
+        streams = streams or ["latlng", "altitude", "time"]
+        stream_keys = ",".join(streams)
         response = self._request(
             user_id,
             method="get",
@@ -266,35 +250,10 @@ class StravaHandler:
             params={
                 # for some reason we can't just pass a list of keys
                 # it needs to be a string of keys separated by ,
-                "keys": "latlng,time,altitude",
+                "keys": stream_keys,
                 "key_by_type": True
             }
         )
         if not response:
             return None
-        content = response.json()
-
-        latlng_stream = content.get("latlng")
-        alt_stream = content.get("altitude")
-        time_stream = content.get("time")
-        if not all((latlng_stream, alt_stream, time_stream)):
-            # TODO: proper Error
-            print(
-                f"Can't Build Track\nlatlng_stream: {bool(latlng_stream)}\nalt_stream: "
-                f"{bool(alt_stream)}\ntime_stream: {bool(time_stream)}")
-            return None
-
-        lat_stream, lng_stream = zip(*content["latlng"]["data"])
-        track = gpd.GeoDataFrame(
-            data={
-                "latitude": lat_stream,
-                "longitude": lng_stream,
-                "altitude": alt_stream["data"],
-                "timestamp": [start_time + timedelta(seconds=seconds)
-                              for seconds in time_stream["data"]]
-            },
-            geometry=[Point(lat, lng) for lat, lng in content["latlng"]["data"]],
-            crs="EPSG:4326"
-        ).to_crs("EPSG:3857")
-        self.track_handler.add_track(activity_id, track)
-        return track
+        return response.json()
