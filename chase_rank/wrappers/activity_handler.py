@@ -12,7 +12,7 @@ from .strava_handler import StravaHandler
 
 class ActivityHandler:
 
-    def __init__(self, activities_path: Path, strava_handler: StravaHandler):
+    def __init__(self, activities_path: Path, strava_handler: StravaHandler = None):
         self.activities_path = activities_path
         self.activities: gpd.GeoDataFrame = gpd.GeoDataFrame({
             "strava_id": pd.Series(dtype="str"),  # should be int, but parquet can't handle that yet?
@@ -112,7 +112,7 @@ class ActivityHandler:
             return self.activities[activity_id]
 
         # try to fetch the activity from strava
-        if not user_id:
+        if not user_id or not self.strava:
             # TODO: proper logging
             raise KeyError
         activity = self.strava.get_activity_by_id(user_id=user_id, activity_id=activity_id)
@@ -131,8 +131,12 @@ class ActivityHandler:
 
         # get activities from strava
         if refresh:
-            activities = self.strava.get_logged_in_athlete_activities(user_id=user_id, before=before, after=after)
-            self.add(activities)
+            if self.strava:
+                activities = self.strava.get_logged_in_athlete_activities(user_id=user_id, before=before, after=after)
+                self.add(activities)
+            else:
+                print("lol no strava")
+                # TODO: log & raise
 
         return self.activities[
             (self.activities.user_id == str(user_id)) &  # user_id should be int, but parquet can't handle that yet?
